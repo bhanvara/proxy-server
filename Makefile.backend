@@ -1,0 +1,11 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -pthread
+TARGET = dummy_server
+
+all: $(TARGET)
+
+$(TARGET): dummy_server.c
+	$(CC) $(CFLAGS) -o $(TARGET) dummy_server.c
+
+clean:
+	rm -f $(TARGET)

@@ -1,0 +1,11 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -pthread
+TARGET = simulate_client
+
+all: $(TARGET)
+
+$(TARGET): simulate_clients.c
+	$(CC) $(CFLAGS) -o $(TARGET) simulate_clients.c
+
+clean:
+	rm -f $(TARGET)
