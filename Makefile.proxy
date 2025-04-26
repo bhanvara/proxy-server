@@ -4,8 +4,8 @@ TARGET = proxy_server
 
 all: $(TARGET)
 
-$(TARGET): main.c proxy.c thread_pool.c
-	$(CC) $(CFLAGS) -o $(TARGET) main.c proxy.c thread_pool.c
+$(TARGET): proxy.c backend_servers.c thread_pool.c
+	$(CC) $(CFLAGS) -o $(TARGET) proxy.c backend_servers.c thread_pool.c
 
 clean:
 	rm -f $(TARGET)

@@ -7,7 +7,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-        printf("Usage: %s <port>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
         return 1;
     }
 
@@ -22,7 +22,10 @@ int main(int argc, char *argv[]) {
     }
 
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("Dummy: setsockopt failed");
+        exit(EXIT_FAILURE);
+    }
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -33,8 +36,13 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    listen(server_fd, 10);
+    if (listen(server_fd, 10) < 0) {
+        perror("Dummy: listen failed");
+        exit(EXIT_FAILURE);
+    }
+
     printf("Dummy server listening on port %d...\n", port);
+    fflush(stdout);
 
     while (1) {
         new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
@@ -43,12 +51,18 @@ int main(int argc, char *argv[]) {
             continue;
         }
         printf("Dummy server: Connection received. Simulating processing...\n");
+        fflush(stdout);
+
         // Simulate backend processing delay
         sleep(2);
+
         char *response = "Hello from dummy backend server";
         write(new_socket, response, strlen(response));
         close(new_socket);
+
         printf("Dummy server: Response sent and connection closed.\n");
+        fflush(stdout);
     }
+
     return 0;
 }
