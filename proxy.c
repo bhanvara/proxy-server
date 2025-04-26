@@ -1,6 +1,7 @@
 #include "proxy.h"
 #include "backend_servers.h"
 #include "config.h"
+#include "cache.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -50,6 +51,7 @@ typedef struct {
     conn_state_t state;
     char buffer[BUFFER_SIZE];
     ssize_t buflen;
+    char req_key[BUFFER_SIZE];  // copy of the GET request (if applicable) to use as cache key
 } connection_t;
 
 void set_nonblocking(int fd) {
@@ -90,6 +92,9 @@ void add_fd(int epoll_fd, int fd, connection_t *conn, uint32_t events) {
 int main() {
     int listen_fd, epoll_fd;
     struct sockaddr_in listen_addr;
+
+    // Initialize cache before starting (cache_init defined in cache.c)
+    cache_init();
 
     // Create listening socket
     if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -140,7 +145,7 @@ int main() {
             break;
         }
         for (int i = 0; i < nfds; i++) {
-            // Check if the event is on the listening socket
+            // Check if the event is for the listening socket
             if (events[i].data.fd == listen_fd) {
                 // Accept all pending connections
                 while (1) {
@@ -170,6 +175,7 @@ int main() {
                     conn->backend_index = index;
                     conn->state = STATE_BACKEND_CONNECT;
                     conn->buflen = 0;
+                    memset(conn->req_key, 0, sizeof(conn->req_key));
                     
                     // Create backend socket
                     if ((conn->backend_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -215,9 +221,7 @@ int main() {
             } else {
                 // The event is for one of our connection fds.
                 connection_t *conn = events[i].data.ptr;
-                // Use the connection state to decide which FD is triggering.
                 if (conn->state == STATE_BACKEND_CONNECT) {
-                    // We only registered backend_fd for EPOLLOUT in this state.
                     if (events[i].events & EPOLLOUT) {
                         int err = 0;
                         socklen_t len = sizeof(err);
@@ -231,7 +235,7 @@ int main() {
                         struct epoll_event ev_mod;
                         memset(&ev_mod, 0, sizeof(ev_mod));
                         ev_mod.events = EPOLLIN;
-                        ev_mod.data.ptr = conn;  // still associated to this connection
+                        ev_mod.data.ptr = conn;
                         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->backend_fd, &ev_mod) < 0) {
                             perror("epoll_ctl MOD backend_fd");
                             cleanup_connection(epoll_fd, conn);
@@ -240,16 +244,33 @@ int main() {
                         printf("[Proxy] Connected to backend FD %d for client FD %d\n", conn->backend_fd, conn->client_fd);
                     }
                 } else if (conn->state == STATE_WAIT_CLIENT) {
-                    // We only registered client_fd for EPOLLIN in this state.
                     if (events[i].events & EPOLLIN) {
-                        ssize_t n = read(conn->client_fd, conn->buffer, sizeof(conn->buffer));
+                        ssize_t n = read(conn->client_fd, conn->buffer, sizeof(conn->buffer) - 1);
                         if (n <= 0) {
                             if (n < 0)
                                 perror("read from client");
                             cleanup_connection(epoll_fd, conn);
                             continue;
                         }
+                        conn->buffer[n] = '\0';  // ensure null-termination
                         conn->buflen = n;
+                        
+                        // If the request is a GET, check the cache.
+                        if (strncmp(conn->buffer, "GET", 3) == 0) {
+                            char *cached_response = cache_lookup(conn->buffer);
+                            if (cached_response) {
+                                printf("[Proxy] Found cached response for client FD %d\n", conn->client_fd);
+                                write(conn->client_fd, cached_response, strlen(cached_response));
+                                cleanup_connection(epoll_fd, conn);
+                                continue;
+                            }
+                            // Save GET request as cache key for later caching.
+                            strncpy(conn->req_key, conn->buffer, BUFFER_SIZE);
+                            conn->req_key[BUFFER_SIZE - 1] = '\0';
+                        } else {
+                            conn->req_key[0] = '\0';
+                        }
+                        
                         printf("[Proxy] Read %zd bytes from client FD %d, sending to backend FD %d\n", 
                                n, conn->client_fd, conn->backend_fd);
                         ssize_t wn = write(conn->backend_fd, conn->buffer, conn->buflen);
@@ -270,15 +291,15 @@ int main() {
                         }
                     }
                 } else if (conn->state == STATE_WAIT_BACKEND) {
-                    // We have registered backend_fd for EPOLLIN while waiting for response.
                     if (events[i].events & EPOLLIN) {
-                        ssize_t n = read(conn->backend_fd, conn->buffer, sizeof(conn->buffer));
+                        ssize_t n = read(conn->backend_fd, conn->buffer, sizeof(conn->buffer) - 1);
                         if (n <= 0) {
                             if (n < 0)
                                 perror("read from backend");
                             cleanup_connection(epoll_fd, conn);
                             continue;
                         }
+                        conn->buffer[n] = '\0';
                         printf("[Proxy] Read %zd bytes from backend FD %d, sending to client FD %d\n",
                                n, conn->backend_fd, conn->client_fd);
                         ssize_t wn = write(conn->client_fd, conn->buffer, n);
@@ -286,6 +307,10 @@ int main() {
                             perror("write to client");
                             cleanup_connection(epoll_fd, conn);
                             continue;
+                        }
+                        // If the original request was GET, cache the backend response with a TTL of 60 seconds.
+                        if (conn->req_key[0] != '\0') {
+                            cache_insert(conn->req_key, conn->buffer, 60);
                         }
                         conn->state = STATE_DONE;
                         cleanup_connection(epoll_fd, conn);
